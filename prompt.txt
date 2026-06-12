@@ -1,0 +1,369 @@
+# Frontend Build Prompt for Antigravity Agent
+
+---
+
+## Project Context
+
+**CINE-MARK** - Movie watchlist application. Backend + Database complete. Need Next.js 14 frontend.
+
+### Backend (Running on `http://localhost:8080/api/v1`)
+- **Auth**: Google OAuth → JWT (15m access / 7d refresh) in httpOnly cookies
+- **Movies**: OMDB search + detail, Redis cached
+- **Watchlists**: CRUD, pagination, many-to-many with movies
+- **Database**: PostgreSQL (Neon) via Prisma
+- **All endpoints tested and working**
+
+### Database Schema
+```prisma
+User { id, email, name, picture, googleId, refreshToken, createdAt, watchlists[] }
+Movie { id, imdbID@unique, title, year, type, cast, genre, director, writer, actors, plot, country, poster, imdbRating, createdAt, updatedAt, watchlists[] }
+Watchlist { id, name, userId, status(PLAN_TO_WATCH|COMPLETED), user, movies[], createdAt, @@index([userId]) }
+```
+
+---
+
+## Tech Stack (Fixed)
+
+| Layer | Choice |
+|-------|--------|
+| Framework | Next.js 14 (App Router, TypeScript) |
+| Styling | Tailwind CSS + shadcn/ui |
+| State (Server) | TanStack Query v5 |
+| State (Auth) | React Context + Axios interceptors |
+| HTTP Client | Axios (withCredentials: true) |
+| Auth UI | @react-oauth/google |
+| Icons | lucide-react |
+| Theme | next-themes (dark/light) |
+| Toasts | sonner |
+
+---
+
+## Environment Variables (Frontend `.env.local`)
+
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8080/api/v1
+NEXT_PUBLIC_GOOGLE_CLIENT_ID=224435958402-jiapn8oak2san2q523rddkh2tb8demvv.apps.googleusercontent.com
+```
+
+---
+
+## Page Routes (App Router)
+
+```
+app/
+├── layout.tsx                 # Providers: Query, Theme, Auth
+├── page.tsx                   # Redirect: logged in → /dashboard, else → /login
+├── login/
+│   └── page.tsx               # Google OAuth button only
+├── dashboard/
+│   └── page.tsx               # Watchlist cards grid + stats
+├── movies/
+│   ├── search/
+│   │   └── page.tsx           # Search form + MovieGrid + Pagination
+│   └── [imdbID]/
+│       └── page.tsx           # MovieDetail (plot, cast, rating, poster, Add to Watchlist)
+├── watchlists/
+│   ├── page.tsx               # All watchlists (paginated cards)
+│   ├── new/
+│   │   └── page.tsx           # Create watchlist form
+│   └── [id]/
+│       └── page.tsx           # WatchlistDetail: header + MovieGrid + Pagination + Remove/Delete
+└── settings/
+    └── page.tsx               # User profile + Logout button
+```
+
+---
+
+## Component Library to Build
+
+### `components/ui/` — shadcn/ui primitives (install via `npx shadcn-ui@latest add`)
+- `button`, `card`, `input`, `dialog`, `dropdown-menu`, `avatar`, `badge`, `skeleton`, `scroll-area`, `separator`, `label`, `textarea`
+
+### `components/auth/`
+```tsx
+// GoogleLoginButton.tsx - wraps @react-oauth/google GoogleLogin
+// AuthProvider.tsx - Context: user, login(), logout(), isLoading
+// useAuth.ts - hook to access context
+```
+
+### `components/movies/`
+```tsx
+// MovieCard.tsx - Poster, title, year, rating badge, "Add to Watchlist" button
+// MovieGrid.tsx - Responsive grid (1 col mobile, 2 tablet, 4 desktop) + EmptyState
+// MovieSearchForm.tsx - Debounced input (300ms), enters → search
+// MovieDetail.tsx - Full poster, title, year, genre, director, cast, plot, rating, AddToWatchlistModal trigger
+```
+
+### `components/watchlists/`
+```tsx
+// WatchlistCard.tsx - Name, movie count, status badge, menu (rename/delete)
+// WatchlistGrid.tsx - Grid of WatchlistCard + EmptyState
+// WatchlistForm.tsx - Name input (1-50 chars), submit
+// WatchlistDetail.tsx - Header (name, status, count), MovieGrid, Pagination
+// AddToWatchlistModal.tsx - Dialog: select user's watchlists (radio), confirm → POST /watchlist/:id/:movieId
+```
+
+### `components/layout/`
+```tsx
+// Header.tsx - Logo, Search shortcut (cmd+k), User avatar dropdown (Profile, Settings, Logout)
+// Sidebar.tsx - Nav links (Dashboard, Search Movies, My Watchlists, New Watchlist)
+// MainLayout.tsx - Sidebar + Header + {children} (responsive drawer on mobile)
+```
+
+### `components/common/`
+```tsx
+// Pagination.tsx - Prev/Next, page numbers, ellipsis
+// LoadingSkeleton.tsx - MovieCardSkeleton, WatchlistCardSkeleton
+// EmptyState.tsx - Illustration (lucide), title, description, CTA button
+// Toast.tsx - sonner Toaster wrapper
+```
+
+### `components/providers/`
+```tsx
+// QueryProvider.tsx - QueryClient + QueryClientProvider
+// ThemeProvider.tsx - next-themes ThemeProvider (attribute="class", enableSystem)
+// AuthProvider.tsx - See auth/
+```
+
+---
+
+## TanStack Query Keys & Hooks (`lib/queries/`)
+
+```typescript
+// keys.ts
+export const queryKeys = {
+  auth: {
+    user: ['auth', 'user'] as const,
+  },
+  movies: {
+    search: (query: string, page: number) => ['movies', 'search', { query, page }] as const,
+    detail: (imdbID: string) => ['movies', 'detail', imdbID] as const,
+  },
+  watchlists: {
+    list: (page: number, limit: number) => ['watchlists', 'list', { page, limit }] as const,
+    detail: (id: string, page: number, limit: number) => ['watchlists', 'detail', id, { page, limit }] as const,
+    search: (query: string) => ['watchlists', 'search', query] as const,
+  },
+};
+
+// hooks.ts - useMovieSearch, useMovieDetail, useWatchlists, useWatchlistDetail, useCreateWatchlist, useAddMovieToWatchlist, useRemoveMovieFromWatchlist, useDeleteWatchlist
+// All hooks: loading, error, data, refetch, optimistic updates for mutations
+```
+
+---
+
+## API Client (`lib/api.ts`)
+
+```typescript
+// Axios instance:
+// - baseURL: process.env.NEXT_PUBLIC_API_URL
+// - withCredentials: true
+// - Interceptors:
+//   - Request: none needed (cookies auto)
+//   - Response: 401 → POST /auth/refresh (once) → retry original
+//   - Error: normalize to { statusCode, message, success }
+
+// Endpoints:
+// auth: signup, login, refresh, logout
+// movies: search(query, page), detail(imdbID)
+// watchlists: list(page, limit), detail(id, page, limit), search(query), create(name), addMovie(watchlistId, movieId), removeMovie(watchlistId, movieId), delete(id)
+```
+
+---
+
+## Auth Flow Implementation
+
+1. **Login Page** → `GoogleLoginButton` → `credentialResponse.credential` (ID token)
+2. **POST /auth/google/login** → Backend sets httpOnly cookies
+3. **Redirect to `/dashboard`**
+4. **AuthProvider** on mount: `queryClient.invalidateQueries({ queryKey: ['auth', 'user'] })`
+5. **useUser()** hook → `GET /auth/me` (decode JWT client-side from cookie) OR add lightweight `/auth/me` endpoint
+6. **All requests** → cookies sent automatically
+7. **401** → Interceptor calls `POST /auth/refresh` → retry once → if fails, logout + redirect to `/login`
+8. **Logout** → `POST /auth/logout` → clear context → redirect `/login`
+
+> **Note**: Backend has no `/auth/me`. Option A: Decode JWT client-side (access token in cookie not accessible via JS). Option B: Add `GET /auth/me` to backend (recommended - 5 min work). I'll assume Option B.
+
+---
+
+## Optimistic Updates (Critical for UX)
+
+| Mutation | Optimistic Update |
+|----------|-------------------|
+| `createWatchlist` | Prepend to `watchlists.list` cache |
+| `addMovieToWatchlist` | Append movie to `watchlists.detail` cache |
+| `removeMovieFromWatchlist` | Filter movie from `watchlists.detail` cache |
+| `deleteWatchlist` | Remove from `watchlists.list` cache |
+
+---
+
+## Responsive Breakpoints (Tailwind)
+
+- Mobile: `< 640px` (1 col grids, drawer sidebar)
+- Tablet: `640px - 1024px` (2 col grids)
+- Desktop: `> 1024px` (4 col movie grid, 3 col watchlist grid, persistent sidebar)
+
+---
+
+## Implementation Order (Lightning Fast)
+
+### Step 1: Scaffold (15 min)
+```bash
+npx create-next-app@latest cine-mark-frontend --typescript --tailwind --eslint --app --src-dir --import-alias "@/*" --use-npm
+cd cine-mark-frontend
+npm i @tanstack/react-query axios @react-oauth/google lucide-react sonner next-themes clsx tailwind-merge
+npm i -D @types/react @types/node
+npx shadcn-ui@latest init --defaults
+npx shadcn-ui@latest add button card input dialog dropdown-menu avatar badge skeleton scroll-area separator label textarea
+```
+
+### Step 2: Providers + Layout (30 min)
+- `QueryProvider`, `ThemeProvider`, `AuthProvider` in `app/providers.tsx`
+- `MainLayout` with Sidebar + Header
+- Root `layout.tsx` wraps everything
+
+### Step 3: Auth (30 min)
+- `GoogleLoginButton` component
+- `AuthProvider` context + `useAuth` hook
+- `/login/page.tsx` → Google button → onSuccess → call login API → redirect
+- Axios interceptor for 401/refresh
+- Protected route wrapper (redirect to `/login` if no user)
+
+### Step 4: API Client + Query Hooks (30 min)
+- `lib/api.ts` with all endpoints
+- `lib/queries/keys.ts` + `hooks.ts` with all queries/mutations
+
+### Step 5: Movie Search (45 min)
+- `MovieCard`, `MovieGrid`, `MovieSearchForm`, `Pagination`, `LoadingSkeleton`, `EmptyState`
+- `/movies/search/page.tsx` - server component fetches first page, client component handles pagination
+
+### Step 6: Movie Detail (30 min)
+- `MovieDetail` component
+- `/movies/[imdbID]/page.tsx` - server component fetches movie, passes to client component
+
+### Step 7: Watchlists CRUD (60 min)
+- `WatchlistCard`, `WatchlistGrid`, `WatchlistForm`, `WatchlistDetail`, `AddToWatchlistModal`
+- `/watchlists/page.tsx` - list with pagination
+- `/watchlists/new/page.tsx` - create form
+- `/watchlists/[id]/page.tsx` - detail with movie grid + pagination
+- Integrate `AddToWatchlistModal` into `MovieCard` and `MovieDetail`
+
+### Step 8: Dashboard + Settings (20 min)
+- `/dashboard/page.tsx` - watchlist grid + quick stats
+- `/settings/page.tsx` - user info + logout button
+
+### Step 9: Polish (30 min)
+- Dark mode toggle in Header
+- Toasts for all mutations
+- Loading skeletons everywhere
+- Empty states with CTAs
+- Error boundaries
+- SEO metadata
+
+---
+
+## File Tree (Target)
+
+```
+cine-mark-frontend/
+├── .env.local
+├── next.config.mjs
+├── tailwind.config.ts
+├── src/
+│   ├── app/
+│   │   ├── layout.tsx
+│   │   ├── page.tsx
+│   │   ├── providers.tsx
+│   │   ├── login/page.tsx
+│   │   ├── dashboard/page.tsx
+│   │   ├── settings/page.tsx
+│   │   ├── movies/
+│   │   │   ├── search/page.tsx
+│   │   │   └── [imdbID]/page.tsx
+│   │   └── watchlists/
+│   │       ├── page.tsx
+│   │       ├── new/page.tsx
+│   │       └── [id]/page.tsx
+│   ├── components/
+│   │   ├── ui/                    # shadcn components
+│   │   ├── auth/
+│   │   ├── movies/
+│   │   ├── watchlists/
+│   │   ├── layout/
+│   │   ├── common/
+│   │   └── providers/
+│   ├── lib/
+│   │   ├── api.ts
+│   │   ├── queries/
+│   │   │   ├── keys.ts
+│   │   │   └── hooks.ts
+│   │   ├── utils.ts               # cn() helper
+│   │   └── auth.ts                # JWT decode helper
+│   ├── hooks/
+│   │   └── useAuth.ts
+│   └── types/
+│       └── index.ts               # API response types
+├── package.json
+└── tsconfig.json
+```
+
+---
+
+## Backend Alignment Checklist (Verify Before Starting)
+
+- [ ] Backend running on `http://localhost:8080`
+- [ ] `POST /auth/google/login` works with Google ID token
+- [ ] `POST /auth/refresh` rotates tokens correctly
+- [ ] `GET /movie/search?query=X&page=1` returns `{ movies: [], meta: {} }`
+- [ ] `GET /movie/:imdbID` returns full movie object
+- [ ] `GET /watchlist?page=1&limit=10` returns `{ watchlists: [], meta: {} }`
+- [ ] `GET /watchlist/:id?page=1&limit=10` returns `{ watchlistInfo, movies, meta }`
+- [ ] `POST /watchlist` creates watchlist
+- [ ] `POST /watchlist/:watchlistId/:movieId` adds movie
+- [ ] `DELETE /watchlist/:watchlistId/:movieId` removes movie
+- [ ] `DELETE /watchlist/:id` deletes watchlist
+- [ ] Cookies work cross-origin (CORS_ORIGIN includes frontend URL)
+
+---
+
+## Anti-Patterns to Avoid
+
+| Don't | Do |
+|-------|----|
+| Use `useEffect` for data fetching | Use TanStack Query |
+| Store tokens in localStorage | Use httpOnly cookies (backend handles) |
+| Direct axios calls in components | Use query hooks |
+| Mutate cache manually without rollback | Use `onMutate`/`onError`/`onSettled` |
+| Hardcode API URLs | Use `NEXT_PUBLIC_API_URL` |
+| Skip loading/error states | Every query has skeleton + error toast |
+| Forget `withCredentials: true` | Set once in axios instance |
+
+---
+
+## Success Criteria
+
+1. **Login** → Google OAuth → lands on `/dashboard` with user name/avatar
+2. **Search** → "Inception" → shows 10 results with posters → pagination works
+3. **Movie Detail** → Click movie → full info page → "Add to Watchlist" opens modal
+4. **Create Watchlist** → `/watchlists/new` → name → appears in `/watchlists`
+5. **View Watchlist** → Click watchlist → shows movies → pagination → remove works
+6. **Delete Watchlist** → Menu → Delete → removed from list
+7. **Logout** → Settings → Logout → redirects to `/login` → cookies cleared
+8. **Dark Mode** → Toggle → persists → works on reload
+9. **Refresh Token** → Wait 15min → API calls still work (auto-refresh)
+10. **No Console Errors** → Clean build, no hydration mismatches
+
+---
+
+## Handoff to You (Human)
+
+After antigravity agent completes:
+1. Run `npm run dev` on frontend (port 3000)
+2. Run `npm run dev` on backend (port 8080)
+3. Test all 10 success criteria above
+4. Report any misalignments
+5. Then we design AI integration
+
+---
+
+**This prompt is complete. Give it to antigravity agent.** They have everything needed to build the frontend in ~4-5 hours.
